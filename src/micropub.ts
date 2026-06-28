@@ -2,11 +2,18 @@ import { requestUrl } from "obsidian";
 import type { AuthenticatedMicroblogSettings } from "./settings";
 import type { ExtractedPost, PublishResult } from "./note";
 
+export function isSecureEndpoint(url: string): boolean {
+  return url.startsWith("https://");
+}
+
 export async function publishPost(
   settings: AuthenticatedMicroblogSettings,
   post: ExtractedPost,
   status: "published" | "draft"
 ): Promise<PublishResult> {
+  if (!isSecureEndpoint(settings.micropubEndpoint)) {
+    throw new Error("Publish blocked: endpoint must use https://.");
+  }
   const payload = new URLSearchParams();
   payload.set("h", "entry");
   payload.set("content", post.content);
@@ -44,6 +51,9 @@ export async function updatePost(
   url: string,
   post: ExtractedPost
 ): Promise<void> {
+  if (!isSecureEndpoint(settings.micropubEndpoint)) {
+    throw new Error("Update blocked: endpoint must use https://.");
+  }
   const replace: Record<string, unknown[]> = {
     content: [post.content]
   };
@@ -74,7 +84,10 @@ export async function uploadMedia(
   data: ArrayBuffer,
   filename: string
 ): Promise<string> {
-  const boundary = "----microblog" + Math.random().toString(36).slice(2);
+  if (!isSecureEndpoint(settings.mediaEndpoint)) {
+    throw new Error("Media upload blocked: endpoint must use https://.");
+  }
+  const boundary = "----microblog" + crypto.randomUUID();
   const mime = guessMime(filename);
 
   const head = new TextEncoder().encode(
@@ -117,6 +130,9 @@ export interface SyndicationTarget {
 export async function fetchSyndicationTargets(
   settings: AuthenticatedMicroblogSettings
 ): Promise<SyndicationTarget[]> {
+  if (!isSecureEndpoint(settings.micropubEndpoint)) {
+    throw new Error("Syndication query blocked: endpoint must use https://.");
+  }
   const url = `${settings.micropubEndpoint}?q=syndicate-to`;
   const res = await requestUrl({
     url,
@@ -127,8 +143,22 @@ export async function fetchSyndicationTargets(
   if (res.status >= 400) {
     throw new Error(`Syndication query ${res.status}: ${responseErrorText(res.text)}`);
   }
-  const json = res.json as { "syndicate-to"?: SyndicationTarget[] };
-  return json["syndicate-to"] ?? [];
+  return parseSyndicationTargets(res.json);
+}
+
+function parseSyndicationTargets(json: unknown): SyndicationTarget[] {
+  if (!isRecord(json)) return [];
+  const raw = json["syndicate-to"];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(isSyndicationTarget);
+}
+
+function isSyndicationTarget(value: unknown): value is SyndicationTarget {
+  return (
+    isRecord(value) &&
+    typeof value.uid === "string" &&
+    typeof value.name === "string"
+  );
 }
 
 function locationFromHeaders(headers: Record<string, string>): string | null {
@@ -157,12 +187,17 @@ function escapeQuotedString(value: string): string {
 }
 
 function responseErrorText(text: string): string {
-  const stripped = text
+  const truncated = text.slice(0, 2000);
+  const stripped = truncated
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
-  return (stripped || text || "No error details returned.").slice(0, 300);
+  return (stripped || truncated || "No error details returned.").slice(0, 300);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
